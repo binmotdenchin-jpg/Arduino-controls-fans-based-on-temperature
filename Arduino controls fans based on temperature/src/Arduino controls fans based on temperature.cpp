@@ -1,297 +1,221 @@
-// =====================================================================================================
-// =====================================================================================================
-// ===============================  Authors: John Kennedy Loria Segundo  ===============================
-// ====================  Arduino controls fans based on temperature.cpp - ver: 0.1  ====================
-// ===========  Initial Date: 17/11/2018 - Update Date: 14/12/2018 - Final Date: ??/??/2018  ===========
-// =====================================================================================================
-// =====================================================================================================
 
-//		STATUS:
-//
-//							IN PROGRESS...
-//
 
-//	Code Function:
-//
-//
-//			EN:
-//			Create a program that monitors the temperature of a device and proportionally increases
-//			the speed of a FAN according to temperature, while another FAN is variable through a
-//			potentiometer, when the temperature reaches a critical level it touches a buzzer and
-//			lights an LED, and button to momentarily stop the first FAN and lights an LED indicating
-//			it is pressed. An LCD indicates the temperature and give warnings. Have an emergency
-//			cooling routine, turning on both Fans at the maximum and preventing getting out of this
-//			routine until the temperature reaches a safe level.
-//
-//			PT:
-//			Criar um programa que monitora a temperatura de um dispositivo e, proporcionalmente
-//			aumenta a velocidade de um FAN conforme a temperatura, enquanto outro FAN é variável
-//			através de um potenciômetro, quando a temperatura chegar a um nível crítico toca um
-//			buzzer e acende um LED, e um botão para parar momentaneamente o primeiro FAN e acende
-//			um LED indicando que está pressionado.
-//			Um LCD indicar a temperatura e dar avisos.
-//			Ter uma rotina de resfriamento de emergencia, ligando os dois Fans no máximo e
-//			impedindo sair dessa rotina até que a temperatura alcance um nível seguro.
-//
-//					Itens:
-//					—	2x Fans;
-//					—	1x Potentiometer;
-//					—	1x Buzzer;
-//					—	3x LEDs;
-//					—	1x LCD;
-//					—	1x Button;
-//					—	1x LM35 (Temperature Sensor).
-//
+#include <Arduino.h>
+#include <LiquidCrystal_I2C.h>
+#include "TimerOne.h"
 
-//	Logical Description:
-//
-//
-//
-//
 
-//	Version Details:
-//
-//
-//				This code has been created to exercise Arduino language
-//				development (focused in C++) for Arduino MCU modules.
-//
-//
-//				In this project has been used:
-//
-//				- 		 Board:		Arduino UNO
-//				- 		   MCU:		Atmel - ATMEGA328P
-//				- 		 Clock:		16MHz (Xtal: 16MHz)
-//				- 		Editor:		Sublime Text (Version 3.1.1)
-//				- 		Syntax:		Arduino Language (C++ based)
-//				-      Library:		LiquidCrystal_I2C / TimerOne
-//				-  Compilation:		Arduino IDE
-//				-	 Simulator:		Proteus 8.4
-//				-  Boot-loader: 	Arduino Uno
-//
+#define Fan_2           10 
+#define Fan_1            9 
 
-//										CODING:
-//  ----------------------------------------------------------------------------------------------------
+#define Button           2 
 
-//				Initial Definitions:
+#define Potentiometer   15 
+#define LM35            14 
 
-			#include 	<Arduino.h>
-			#include 	<LiquidCrystal_I2C.h>
-			#include 	"TimerOne.h"
+#define Buzzer          13 
+#define LED_Warning     12 
+#define LED_Stoped       8 
+#define LED_Normal       7 
 
-		#define 	Fan_2 			10
-		#define 	Fan_1 			 9
 
-		#define 	Button 			 2
 
-		#define 	Potentiometer	15
-		#define 	LM35 			14
+LiquidCrystal_I2C lcd(0x20, 16, 2); // Khởi tạo LCD địa chỉ 0x20, 16 cột 2 dòng
 
-		#define		Buzzer 			13
-		#define		LED_Warning 	12
-		#define		LED_Stoped 		 8
-		#define		LED_Normal 		 7
+float LM35_update_measure = 0;
+float LM35_update_measure_old = 0;
+int   LM35_update_measure_for_PWM = 0;
+
+float Potentiometer_update_measure = 0;
+float Potentiometer_update_measure_old = 0;
+int   Potentiometer_update_measure_for_PWM = 0;
+
+bool Normal_State = true;
+
+// Khai báo volatile cho biến bị thay đổi bên trong hàm ngắt (để tránh trình biên dịch tối ưu hóa sai)
+volatile bool Stoped_State = false;
 
 //  ----------------------------------------------------------------------------------------------------
+//  Hàm chức năng: Xử lý ngắt khi nhấn nút (StopFan_isr)
+//  Tác dụng: Được gọi tự động ngay lập tức khi người dùng nhấn nút. 
+//  Nó sẽ đảo trạng thái cờ Stoped_State để bật/tắt Quạt 1 tạm thời và có cơ chế chống dội phím (debounce).
+//  ----------------------------------------------------------------------------------------------------
+void StopFan_isr() {
+    static unsigned long last_interrupt_time = 0;
+    unsigned long interrupt_time = millis();
+    
+    // Nếu khoảng cách giữa 2 lần tín hiệu > 250ms thì mới nhận (chống nhiễu nút nhấn cơ học)
+    if (interrupt_time - last_interrupt_time > 250) {
+        Stoped_State = !Stoped_State; // Đảo trạng thái
+    }
+    last_interrupt_time = interrupt_time;
+}
+int calculateFanPWM(float temperature) {
+    int pwm = map((int)temperature, 45, 75, 338, 1023);
+    if (pwm < 338) return 338;  // Giới hạn dưới
+    if (pwm > 1023) return 1023; // Giới hạn trên
+    return pwm;
+}
 
-//				Memory Organization:
 
-	LiquidCrystal_I2C lcd( 0x20, 16, 2 ); 
 
-	byte LM35_update_measure = 0 ;
-	byte LM35_update_measure_old = 0 ;
-
-	int	 LM35_update_measure_for_PWM = 0 ;
-
-	int  Potentiometer_update_measure = 0 ;
-	int  Potentiometer_update_measure_old = 0 ;
-
-	int  Potentiometer_update_measure_for_PWM = 0 ;
-
-	bool Normal_State =  true ;
-	bool Stoped_State = false ;
 
 //  ----------------------------------------------------------------------------------------------------
+//  Hàm chức năng: Cập nhật các thông số đo lường (Update_measures)
+//  Tác dụng: Đọc giá trị từ cảm biến nhiệt độ LM35 và biến trở, sau đó tính toán và xuất xung PWM ra quạt.
+//  ----------------------------------------------------------------------------------------------------
+void Update_measures() {
+    // 1. Đọc và tính toán nhiệt độ từ LM35
+    LM35_update_measure = (analogRead(LM35) * 5.0 / 1023.0) / 0.01;
+    
+    // Quy đổi nhiệt độ (45C - 75C) ra chu kỳ xung PWM (338 - 1023 tương đương 33% - 100%)
+    LM35_update_measure_for_PWM = map((int)LM35_update_measure, 45, 75, 338, 1023);
+    if (LM35_update_measure_for_PWM < 338) {
+        LM35_update_measure_for_PWM = 338; // Giữ tốc độ tối thiểu
+    }
+    if (LM35_update_measure_for_PWM > 1023) {
+        LM35_update_measure_for_PWM = 1023; // Giới hạn tốc độ tối đa
+    }
 
-//				Update_measures_isr (TimerOne Interrupt Sub-Routine):
+    // 2. Đọc và tính toán giá trị biến trở
+    Potentiometer_update_measure = (analogRead(Potentiometer) * 5.0 / 1023.0) * 20.0; // Phần trăm hiển thị
+    Potentiometer_update_measure_for_PWM = analogRead(Potentiometer); // Lấy trực tiếp giá trị 0-1023 cho PWM
 
-void Update_measures_isr()
-{
-	LM35_update_measure = (float(analogRead(LM35)) * 5 / (1023)) / 0.01;
-	LM35_update_measure_for_PWM = map( LM35_update_measure, 45 , 75 , 338 , 1023 );
-	if( LM35_update_measure_for_PWM < 338 )
-	{
-		LM35_update_measure_for_PWM = 338 ;
-	}
+    // 3. Điều khiển Quạt 2 (Chỉnh thủ công bằng biến trở)
+    Timer1.setPwmDuty(Fan_2, Potentiometer_update_measure_for_PWM);
 
-	Potentiometer_update_measure = (float(analogRead(Potentiometer)) * 5 / (1023) * 20);
-	Potentiometer_update_measure_for_PWM = (float(analogRead(Potentiometer)) * 5 / (1023) * 204.6);
+    // 4. Điều khiển Quạt 1 (Chạy tự động theo nhiệt độ kết hợp kiểm tra nút dừng)
+    if (Stoped_State == true) {
+        Timer1.setPwmDuty(Fan_1, 0); // Dừng quạt 1
+        digitalWrite(LED_Stoped, HIGH); // Bật LED báo dừng
+    } else {
+        Timer1.setPwmDuty(Fan_1, LM35_update_measure_for_PWM); // Chạy theo nhiệt độ
+        digitalWrite(LED_Stoped, LOW); // Tắt LED báo dừng
+    }
 
-	Timer1.setPwmDuty(Fan_2, Potentiometer_update_measure_for_PWM);
-	Timer1.setPwmDuty(Fan_1, LM35_update_measure_for_PWM);
-
-	if( LM35_update_measure > 75 )
-	{
-		Normal_State = false ;
-	}
-	if( LM35_update_measure <= 75 )
-	{
-		Normal_State = true ;
-	}
+    // Cập nhật trạng thái hệ thống
+    if (LM35_update_measure > 75) {
+        Normal_State = false;
+    } else {
+        Normal_State = true;
+    }
 }
 
 //  ----------------------------------------------------------------------------------------------------
-
-//				StopFan_isr (Interrupt Sub-Routine):
-/*
-void StopFan_isr() 									// Maybe doesn't work properly
-{
-	Timer1.setPwmDuty( Fan_2, 0 ); 					
-	
-	if( digitalRead( Button ) != HIGH )
-	{
-		Stoped_State = true ;
-		digitalWrite( LED_Stoped, HIGH );
-	}
-	else
-	{
-		Stoped_State = false ;
-		digitalWrite( LED_Stoped, LOW );
-	}
-}	*/
-
+//  Hàm chức năng: Hiển thị nhiệt độ và phần trăm biến trở lên LCD (ShowTemperature)
+//  Tác dụng: In thông số ra màn hình. Chỉ xóa và in lại màn hình khi có sự thay đổi giá trị để tránh chớp giật.
 //  ----------------------------------------------------------------------------------------------------
+void ShowTemperature() {
+    if (abs(LM35_update_measure - LM35_update_measure_old) >= 0.5 || 
+        abs(Potentiometer_update_measure - Potentiometer_update_measure_old) >= 1.0) {
+        
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Temp: ");
+        lcd.print(LM35_update_measure, 1); // In 1 số thập phân
+        lcd.print("\xDF"); // Mã ký tự hiển thị dấu độ (°)
+        lcd.print("C");
 
-//				ShowTemperature Sub-Routine:
+        lcd.setCursor(0, 1);
+        lcd.print("Pot: ");
+        lcd.print((int)Potentiometer_update_measure);
+        lcd.print("%");
 
-void ShowTemperature()
-{
-	if (LM35_update_measure != LM35_update_measure_old || Potentiometer_update_measure != Potentiometer_update_measure_old)
-	{
-		lcd.clear();
-		lcd.setCursor(0, 0);
-		lcd.print("Temp: ");
-		lcd.print(LM35_update_measure);
-		lcd.print("\xDF");
-		lcd.print("C");
-
-		lcd.setCursor(0, 1);
-		lcd.print("Pot: ");
-		lcd.print(Potentiometer_update_measure);
-		lcd.print("%");
-
-		LM35_update_measure_old = LM35_update_measure;
-
-		Potentiometer_update_measure_old = Potentiometer_update_measure;
-	}
+        LM35_update_measure_old = LM35_update_measure;
+        Potentiometer_update_measure_old = Potentiometer_update_measure;
+    }
 }
 
 //  ----------------------------------------------------------------------------------------------------
+//  Hàm chức năng: Cảnh báo và làm mát khẩn cấp (Warning_sr)
+//  Tác dụng: Bật còi báo động, nháy LED và ép cả 2 quạt chạy ở tốc độ tối đa (100%).
+//  Ghi chú fix lỗi: Sửa `HIGH` thành `1023` để quạt chạy 100% công suất.
+//  ----------------------------------------------------------------------------------------------------
+void Warning_sr() {
+    digitalWrite(LED_Normal, LOW);
+    digitalWrite(LED_Warning, HIGH);
+    digitalWrite(Buzzer, LOW); 
 
-//				initializing_routine Sub-Routine:
+    Timer1.setPwmDuty(Fan_2, 1023);
+    Timer1.setPwmDuty(Fan_1, 1023);
 
-void initializing_routine()
-{
-	for ( int i = 0 ; i < 3 ; i++ )
-	{
-		lcd.print("Initializing");
-		delay(250);
-		lcd.clear();
-		lcd.print("Initializing.");
-		delay(250);
-		lcd.clear();
-		lcd.print("Initializing..");
-		delay(250);
-		lcd.clear();
-		lcd.print("Initializing...");
-		delay(250);
-		lcd.clear();
-	}
+    // Thêm các dòng này để ép LCD in chữ khẩn cấp
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("!!! EMERGENCY!!!");
+    lcd.setCursor(0, 1);
+    lcd.print("System Overload!");
 
-	lcd.print(" Welcome =D ");
-	delay(250);
+    LM35_update_measure = (analogRead(LM35) * 5.0 / 1023.0) / 0.01;
+    delay(200); 
 }
 
 //  ----------------------------------------------------------------------------------------------------
+//  Hàm khởi tạo (Setup): Chạy 1 lần duy nhất khi cấp nguồn
+#ifndef PIO_UNIT_TESTING  // Khi chạy unit test (pio test), file test/test_man.cpp có setup()/loop() riêng
+void setup() {
+    // Cài đặt các chân Output
+    pinMode(Buzzer, OUTPUT);
+    digitalWrite(Buzzer, HIGH); // Tắt còi ban đầu
 
-//				Warning_sr Sub-Routine:
+    pinMode(LED_Normal, OUTPUT);
+    pinMode(LED_Warning, OUTPUT);
+    pinMode(LED_Stoped, OUTPUT);
 
-void Warning_sr()
-{
-	digitalWrite( LED_Normal, 	LOW );
-	digitalWrite( LED_Warning, HIGH );
-	digitalWrite( Buzzer, 		LOW );
+    pinMode(Fan_2, OUTPUT);
+    pinMode(Fan_1, OUTPUT);
 
-	Timer1.setPwmDuty( Fan_2, HIGH );
-	Timer1.setPwmDuty( Fan_1, HIGH );
+    // Cài đặt các chân Input
+    pinMode(Potentiometer, INPUT);
+    pinMode(LM35, INPUT);
+    
+    // Dùng INPUT_PULLUP để bật điện trở kéo lên bên trong chip, giúp nút nhấn ổn định hơn
+    pinMode(Button, INPUT_PULLUP); 
 
-	if( LM35_update_measure <= 75 )				// doesn't work
-	{
-		Normal_State = true ;
-	
-		digitalWrite( LED_Normal, HIGH );
-		digitalWrite( LED_Warning, LOW );
-		digitalWrite( Buzzer, 	  HIGH );
-	}
+    // Gắn ngắt ngoài (External Interrupt) cho nút nhấn tại chân số 2
+    attachInterrupt(digitalPinToInterrupt(Button), StopFan_isr, FALLING);
+
+    // Khởi tạo Timer1 với chu kỳ 150 microseconds để băm xung PWM mượt mà
+    Timer1.initialize(150); 
+    
+    // Khởi tạo màn hình LCD
+    lcd.begin(16, 2);
+
+    // Khởi động PWM cho 2 quạt ở mức 50% (512/1023)
+    Timer1.pwm(Fan_2, 512);
+    Timer1.pwm(Fan_1, 512);
+
+    // Bật đèn LED báo trạng thái bình thường
+    digitalWrite(LED_Normal, HIGH); 
 }
 
 //  ----------------------------------------------------------------------------------------------------
+//  Vòng lặp chính (Loop): Chạy liên tục mãi mãi
+void loop() {
+    // Gọi hàm đo lường và hiển thị ở chế độ bình thường
+    Update_measures();
+    ShowTemperature();
 
-//				Start Setup:
+    // Nếu nhiệt độ vượt quá 75 độ C -> vào chế độ khẩn cấp và GIỮ ở đó (vùng trễ 5 độ C)
+    // cho tới khi nhiệt độ giảm xuống mức an toàn 70 độ C.
+    // (Bản cũ dùng while (LM35_update_measure > 75) nên thoát ra ngay ở 75 độ C
+    //  mà chưa tắt đèn cảnh báo và còi -> báo động không bao giờ tự tắt.)
+    if (LM35_update_measure > 75) {
+        while (true) {
+            Warning_sr(); // Gọi hàm cảnh báo (đọc lại nhiệt độ bên trong)
 
-void setup()
-{
-	pinMode( Buzzer, OUTPUT );
-	digitalWrite( Buzzer, HIGH );
-
-	pinMode( LED_Normal, OUTPUT );
-	pinMode( LED_Warning, OUTPUT );
-	pinMode( LED_Stoped, OUTPUT );
-
-	pinMode( Fan_2, OUTPUT );
-	pinMode( Fan_1, OUTPUT );
-
-	pinMode( Potentiometer, INPUT );
-	pinMode( LM35, INPUT );
-
-	pinMode( Button, INPUT );
-
-//	attachInterrupt( Button, StopFan_isr, LOW ); //  Maybe doesn't work properly
-
-	Timer1.initialize(150);
-	Timer1.attachInterrupt( Update_measures_isr );
-
-	lcd.begin( 16 , 2 );
-
-	Timer1.pwm( Fan_2 , 512 );
-	Timer1.pwm( Fan_1 , 512 );
-
-//	initializing_routine();						// Temporally Disable
+            // Thoát vòng lặp an toàn khi nhiệt độ giảm xuống (Mức an toàn: 70 độ C)
+            if (LM35_update_measure <= 70) {
+                Normal_State = true;
+                digitalWrite(LED_Normal, HIGH); // Bật lại đèn bình thường
+                digitalWrite(LED_Warning, LOW); // Tắt đèn cảnh báo
+                digitalWrite(Buzzer, HIGH);     // Tắt còi
+                break; // Phá vỡ vòng lặp while để trở về hoạt động bình thường
+            }
+        }
+    }
+    
+    delay(100); // Trễ nhẹ để vòng lặp loop() không vắt kiệt công suất vi điều khiển
 }
 
-//  ----------------------------------------------------------------------------------------------------
-
-//				Main Routine:
-
-void loop()
-{
-	ShowTemperature();
-
-	while( LM35_update_measure > 75 )
-	{
-		Warning_sr();
-	}
-}
-
-// 										END!  =)
-//  ----------------------------------------------------------------------------------------------------
-
-/*					Sketches:
-
-
-
-
-
-
-
-
-*/
+#endif // PIO_UNIT_TESTING
